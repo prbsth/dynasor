@@ -17,7 +17,7 @@ python "${SCRIPT_DIR}/run.py" \
     --start 0 \
     --end 10 \
     --output "${OUTPUT_DIR}/math500_step32_max16384_trials10" \
-    --probe-tokens 32 \
+    --probe-tokens 128 \
     --probe "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{" \
     "$@"
 set +x

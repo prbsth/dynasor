@@ -67,15 +67,36 @@ def parse_args():
         help="Name or path of the model to use",
     )
     parser.add_argument(
-        "--probe",
+        "--answer-probe",
         type=str,
-        default="**Final Answer**\\n\\nPlease provide your final answer within \\\\boxed{} and then state your confidence probability.\\nFormat: \\\\boxed{MATHEMATICAL_ANSWER}, Probability: NUMERICAL_PROBABILITY\\n\\nNow, provide your answer and probability:\\n\\\\boxed{",
-        help="Probe the LLM to output the answer and probability. Format: \\\\boxed{ANSWER}, Probability: PROBABILITY",
+        default=(
+            "**Final Answer**\\n"
+            "Respond ONLY with the answer inside one \\boxed{...}.\\n\\n"
+            "\\boxed{"
+        ),
+        help="Prompt appended after the main generation to elicit ONLY the final answer.  Override to customise wording.",
     )
     parser.add_argument(
-        "--probe-tokens", type=int, default=30, help="Number of tokens for probe completion (answer + probability)"
+        "--answer-probe-tokens",
+        type=int,
+        default=40,
+        help="Token budget for the answer probe completion",
     )
-
+    parser.add_argument(
+        "--prob-probe",
+        type=str,
+        default=(
+            "Given your final answer above, what is the probability (0 to 1) that your answer is correct?\\n"
+            "Respond with ONLY the number.\\nProbability: "
+        ),
+        help="Prompt used to ask the model for its confidence once it has already produced an answer.",
+    )
+    parser.add_argument(
+        "--prob-probe-tokens",
+        type=int,
+        default=15,
+        help="Token budget for the probability probe completion",
+    )
     parser.add_argument(
         "--url",
         type=str,
@@ -127,8 +148,10 @@ def execute_question_reuse(
     target,
     dataset_type, # Added dataset_type
     max_tokens=[2048],
-    probe=None,
-    probe_tokens=10,
+    answer_probe=None,
+    answer_probe_tokens=10,
+    prob_probe=None,
+    prob_probe_tokens=5,
     num_trials=10,
     problem_id=None,
     output_dir=None,
@@ -197,45 +220,79 @@ def execute_question_reuse(
             "target": target,
         }
 
-        # Generate and save probed responses
-        # Probe prompts are the full context + the probe string from args
-        probe_prompts_for_model = [
-            current_prompts[trial_idx] + completions[trial_idx][0] + probe
+        # ---------------- FIRST PROBE: ANSWER ----------------
+        answer_probe_prompts = [
+            current_prompts[trial_idx] + completions[trial_idx][0] + (answer_probe or "")
             for trial_idx in range(num_trials)
         ]
-        
-        # Only generate probe responses for unfinished trials
-        probe_llm_responses = model.generate_batch_probe(
-            probe_prompts_for_model, # These are what the model sees
-            max_tokens=probe_tokens,
-            is_actives=[not finished for finished in is_finished], # Correctly use is_finished
+
+        answer_probe_responses = model.generate_batch_probe(
+            answer_probe_prompts,
+            max_tokens=answer_probe_tokens,
+            is_actives=[not finished for finished in is_finished],
         )
 
-        round_results["probe_prompts_to_model"] = probe_prompts_for_model # What was sent to model
-        
-        probe_responses_text = []
+        answer_probe_texts = []
+        extracted_answers = []
         for trial_idx in range(num_trials):
-            if is_finished[trial_idx] or probe_llm_responses[trial_idx] is None:
-                probe_responses_text.append("")
+            if is_finished[trial_idx] or answer_probe_responses[trial_idx] is None:
+                answer_probe_texts.append("")
+                extracted_answers.append(None)
             else:
-                probe_responses_text.append(probe_llm_responses[trial_idx].choices[0].text)
-        
-        round_results["probe_responses_text"] = probe_responses_text
+                txt = answer_probe_responses[trial_idx].choices[0].text
+                answer_probe_texts.append(txt)
+                ans = extract_boxed_answer(txt, dataset_type)
+                extracted_answers.append(ans)
 
-        # Extract answers and probabilities from probe responses
-        parsed_probe_outputs = []
+        # ---------------- SECOND PROBE: PROBABILITY ----------------
+        # Determine the answer string to reference in the probability probe
+        answer_strings_for_prob = []
         for trial_idx in range(num_trials):
             if is_finished[trial_idx]:
-                parsed_probe_outputs.append({"answer": None, "probability": None})
+                # Use answer from natural completion
+                full_gen_text = current_prompts[trial_idx] + completions[trial_idx][0]
+                ans = extract_answer(full_gen_text, dataset_type)
             else:
-                ans, prob = extract_boxed_answer_and_probability_local(
-                    probe_responses_text[trial_idx], dataset_type
-                )
-                parsed_probe_outputs.append({"answer": ans, "probability": prob})
+                ans = extracted_answers[trial_idx]
+            answer_strings_for_prob.append(ans or "")
 
-        round_results["probe_extracted_answers"] = [p["answer"] for p in parsed_probe_outputs]
-        round_results["probe_extracted_probabilities"] = [p["probability"] for p in parsed_probe_outputs]
+        prob_probe_prompts = []
+        for trial_idx in range(num_trials):
+            prompt_prefix = (
+                current_prompts[trial_idx] + completions[trial_idx][0] + answer_probe_texts[trial_idx]
+            )
+            prob_prompt = prob_probe.replace("{ANSWER}", answer_strings_for_prob[trial_idx] or "")
+            prob_probe_prompts.append(prompt_prefix + prob_prompt)
 
+        prob_probe_responses = model.generate_batch_probe(
+            prob_probe_prompts,
+            max_tokens=prob_probe_tokens,
+            is_actives=[not finished for finished in is_finished],
+        )
+
+        prob_probe_texts = []
+        extracted_probabilities = []
+        for trial_idx in range(num_trials):
+            if is_finished[trial_idx] or prob_probe_responses[trial_idx] is None:
+                prob_probe_texts.append("")
+                extracted_probabilities.append(None)
+            else:
+                txt = prob_probe_responses[trial_idx].choices[0].text
+                prob_probe_texts.append(txt)
+                # Re-use local extractor just for probability
+                _, prob_val = extract_boxed_answer_and_probability_local("Probability: " + txt, dataset_type)
+                extracted_probabilities.append(prob_val)
+
+        # -------- store in results --------
+        round_results["answer_probe_prompts"] = answer_probe_prompts
+        # Back-compat: keep old key name pointing at answer probe prompts
+        round_results["probe_prompts"] = answer_probe_prompts
+        round_results["answer_probe_responses_text"] = answer_probe_texts
+        round_results["probe_extracted_answers"] = extracted_answers
+
+        round_results["prob_probe_prompts"] = prob_probe_prompts
+        round_results["prob_probe_responses_text"] = prob_probe_texts
+        round_results["probe_extracted_probabilities"] = extracted_probabilities
 
         is_corrects = []
         is_corrects_original = []
@@ -326,8 +383,10 @@ def main():
             target,
             args.dataset, # Pass dataset type
             max_tokens=token_budgets,
-            probe=args.probe,
-            probe_tokens=args.probe_tokens,
+            answer_probe=args.answer_probe,
+            answer_probe_tokens=args.answer_probe_tokens,
+            prob_probe=args.prob_probe,
+            prob_probe_tokens=args.prob_probe_tokens,
             num_trials=num_trials,
             problem_id=problem_id,
             output_dir=output_dir,
