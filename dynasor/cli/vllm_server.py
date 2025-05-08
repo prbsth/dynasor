@@ -55,7 +55,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
-                                              LoadLoraAdapterRequest,
+                                            #   LoadLoraAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
@@ -63,7 +63,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
-                                              UnloadLoraAdapterRequest)
+                                            #   UnloadLoraAdapterRequest
+                                            )
 from vllm.entrypoints.openai.protocol import CompletionStreamResponse
 from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
@@ -770,35 +771,35 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         return Response(status_code=200)
 
 
-if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-    logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!"
-    )
+# if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+#     logger.warning(
+#         "Lora dynamic loading & unloading is enabled in the API server. "
+#         "This should ONLY be used for local development!"
+#     )
 
-    @router.post("/v1/load_lora_adapter")
-    async def load_lora_adapter(request: LoadLoraAdapterRequest, raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.code
-            )
+#     @router.post("/v1/load_lora_adapter")
+#     async def load_lora_adapter(request: LoadLoraAdapterRequest, raw_request: Request):
+#         handler = models(raw_request)
+#         response = await handler.load_lora_adapter(request)
+#         if isinstance(response, ErrorResponse):
+#             return JSONResponse(
+#                 content=response.model_dump(), status_code=response.code
+#             )
 
-        return Response(status_code=200, content=response)
+#         return Response(status_code=200, content=response)
 
-    @router.post("/v1/unload_lora_adapter")
-    async def unload_lora_adapter(
-        request: UnloadLoraAdapterRequest, raw_request: Request
-    ):
-        handler = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.code
-            )
+#     @router.post("/v1/unload_lora_adapter")
+#     async def unload_lora_adapter(
+#         request: UnloadLoraAdapterRequest, raw_request: Request
+#     ):
+#         handler = models(raw_request)
+#         response = await handler.unload_lora_adapter(request)
+#         if isinstance(response, ErrorResponse):
+#             return JSONResponse(
+#                 content=response.model_dump(), status_code=response.code
+#             )
 
-        return Response(status_code=200, content=response)
+#         return Response(status_code=200, content=response)
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -897,14 +898,15 @@ async def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
+    # LoRA support disabled – do not pass lora_modules and skip static-LoRA init
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
-        lora_modules=args.lora_modules,
+        lora_modules=None,
         prompt_adapters=args.prompt_adapters,
     )
-    await state.openai_serving_models.init_static_loras()
+    # await state.openai_serving_models.init_static_loras()
     state.openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
